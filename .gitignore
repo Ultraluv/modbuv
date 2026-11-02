@@ -1,0 +1,9 @@
+/_build/
+/deps/
+/doc/
+/.elixir_ls/
+/.claude/
+/.superpowers/
+*.ez
+modbuv-*.tar
+erl_crash.dump
