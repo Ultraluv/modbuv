@@ -205,7 +205,7 @@ Slave.stop(slave)
 
 ### 5. Vendor Custom Function Codes (`FcMap`)
 
-For Server and Slave roles, function codes are mapped to memory regions using `Modbuv.FcMap`. You can register custom function codes during startup:
+For Server and Slave roles, function codes are mapped to memory regions using `Modbuv.FcMap`. You can register custom function codes during startup or update them dynamically at runtime:
 
 ```elixir
 # Register:
@@ -216,10 +216,18 @@ custom_map = %{
   0x6E => {:w, :reg, :hr, :multi}
 }
 
-# Provide to TCP Server or RTU Slave
+# Provide to TCP Server or RTU Slave at startup
 {:ok, server} = Modbuv.Tcp.Server.start_link(port: 502, model: model, fc_map: custom_map)
 {:ok, slave}  = Modbuv.Rtu.Slave.start_link(tty: "/dev/ttyUSB1", model: model, fc_map: custom_map)
+
+# Or update dynamically at runtime (propagates to all active TCP connections / updates RTU framer):
+:ok = Modbuv.Tcp.Server.set_fc_map(server, %{0x65 => {:r, :reg, :hr}})
+:ok = Modbuv.Rtu.Slave.set_fc_map(slave, %{0x65 => {:r, :reg, :hr}})
 ```
+
+> **Note on Custom Write Codes (`:single` vs `:multi`)**:
+> - **TCP**: Because MBAP headers specify exact PDU length, custom write codes parse both single-write (4-byte body) and multi-write (`5 + byte_count` body) transparently.
+> - **RTU**: The RS485 serial framer requires explicit frame length determination. Custom write codes for RTU slaves must be explicitly registered as `:single` (fixed 8-byte ADU) or `:multi` (variable length derived from `byte_count`).
 
 ---
 

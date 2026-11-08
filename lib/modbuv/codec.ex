@@ -118,7 +118,7 @@ defmodule Modbuv.Codec do
     {:ok, {slave, {fc, :r, width}, address, count}}
   end
 
-  defp parse_request_body(slave, fc, {:w, width, _region, :single}, <<address::16, raw::16>>) do
+  defp parse_request_body(slave, fc, {:w, width, _region, _mode}, <<address::16, raw::16>>) do
     case decode_single(width, raw) do
       {:ok, value} -> {:ok, {slave, {fc, :w, width}, address, value}}
       :error -> {:error, :einval}
@@ -128,7 +128,7 @@ defmodule Modbuv.Codec do
   defp parse_request_body(
          slave,
          fc,
-         {:w, width, _region, :multi},
+         {:w, width, _region, _mode},
          <<address::16, count::16, byte_count::8, data::binary>>
        )
        when count > 0 do

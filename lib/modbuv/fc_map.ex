@@ -2,6 +2,15 @@ defmodule Modbuv.FcMap do
   @moduledoc """
   Server/Slave function-code registry: maps a numeric function code to the
   direction, data width, address region, and (for writes) single/multi layout.
+
+  ### Write Layouts (`:single` vs `:multi`)
+  - **Modbus TCP**: The MBAP header provides the exact PDU byte length, so custom
+    write function codes automatically parse both single-write (4-byte body) and
+    multi-write (`5 + byte_count` body) requests regardless of the layout tag.
+  - **Modbus RTU**: Serial stream framing in `Modbuv.Rtu.Framer` relies on the
+    function code to determine expected frame length. For RTU, you must register
+    the code explicitly as `:single` (fixed 8-byte ADU) or `:multi` (variable
+    length derived from `byte_count`).
   """
 
   @regions [:c, :i, :hr, :ir]
@@ -21,10 +30,11 @@ defmodule Modbuv.FcMap do
   @spec default() :: map()
   def default, do: @default
 
-  @spec merge(map()) :: map()
-  def merge(overrides) when is_map(overrides) do
+  @doc "Merges overrides into the base map (defaults to `@default`). Overrides must have integer keys in 1..127 and valid entries."
+  @spec merge(map(), map()) :: map()
+  def merge(base \\ @default, overrides) when is_map(base) and is_map(overrides) do
     Enum.each(overrides, fn {fc, entry} -> validate!(fc, entry) end)
-    Map.merge(@default, overrides)
+    Map.merge(base, overrides)
   end
 
   @spec lookup(map(), integer()) :: {:ok, tuple()} | :error

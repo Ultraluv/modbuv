@@ -52,4 +52,33 @@ defmodule Modbuv.RtuSlaveTest do
     assert opts[:rx_framing_timeout] == 1_234
     :ok = Slave.stop(pid)
   end
+
+  test "set_fc_map incrementally updates fc_map on slave" do
+    {:ok, pid} = Slave.start_link(tty: "/dev/null", model: @model)
+
+    assert :ok = Slave.set_fc_map(pid, %{65 => {:r, :reg, :hr}})
+    assert :ok = Slave.set_fc_map(pid, %{66 => {:r, :reg, :hr}})
+
+    state = Slave.state(pid)
+    assert Map.has_key?(state.fc_map, 65)
+    assert Map.has_key?(state.fc_map, 66)
+    assert Map.has_key?(state.fc_map, 3)
+
+    # Calling request with newly added custom function code works
+    assert [10] == Slave.request(pid, {1, {65, :r, :reg}, 0, 1})
+
+    :ok = Slave.stop(pid)
+  end
+
+  test "notifies parent_pid with slave_exception on invalid request" do
+    {:ok, pid} = Slave.start_link(tty: "/dev/null", model: @model, active: true)
+
+    # Directly feed an invalid request frame (FC 99 unregistered) through handle_info
+    raw_req = Modbuv.Rtu.pack_req({1, {99, :r, :reg}, 0, 1})
+    send(pid, {:circuits_uart, "dummy", raw_req})
+
+    assert_receive {:modbuv_rtu, {:slave_exception, ^raw_req, 1, 99, :efun}}, 500
+
+    :ok = Slave.stop(pid)
+  end
 end

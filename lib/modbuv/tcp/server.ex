@@ -38,6 +38,12 @@ defmodule Modbuv.Tcp.Server do
   @spec get_db(pid()) :: map()
   def get_db(pid), do: GenServer.call(pid, :get_db)
 
+  @doc "Updates the server's function code mapping at runtime and propagates it to all active handlers."
+  @spec set_fc_map(pid(), map()) :: :ok
+  def set_fc_map(pid, overrides) when is_map(overrides) do
+    GenServer.call(pid, {:set_fc_map, overrides})
+  end
+
   @impl true
   def init({params, parent_pid}) do
     port = Keyword.get(params, :port, 502)
@@ -59,9 +65,10 @@ defmodule Modbuv.Tcp.Server do
         {:ok, actual_port} = :inet.port(listen)
         {:ok, model_pid} = Shared.start_link(model)
         {:ok, sup} = Supervisor.start_link(sup_opts)
+        server_pid = self()
 
         {:ok, acceptor} =
-          Task.start_link(fn -> accept_loop(listen, sup, model_pid, parent_pid, fc_map) end)
+          Task.start_link(fn -> accept_loop(listen, sup, model_pid, parent_pid, server_pid, fc_map) end)
 
         state = %{
           port: actual_port,
@@ -98,6 +105,17 @@ defmodule Modbuv.Tcp.Server do
     {:reply, state.fc_map, state}
   end
 
+  def handle_call({:set_fc_map, overrides}, _from, state) do
+    new_fc_map = FcMap.merge(state.fc_map, overrides)
+
+    for {_id, child_pid, _type, _modules} <- DynamicSupervisor.which_children(state.sup),
+        is_pid(child_pid) do
+      send(child_pid, {:set_fc_map, new_fc_map})
+    end
+
+    {:reply, :ok, %{state | fc_map: new_fc_map}}
+  end
+
   def handle_call(:get_db, _from, state) do
     {:reply, Shared.state(state.model_pid), state}
   end
@@ -112,20 +130,27 @@ defmodule Modbuv.Tcp.Server do
     :ok
   end
 
-  defp accept_loop(listen, sup, model_pid, parent_pid, fc_map) do
+  defp accept_loop(listen, sup, model_pid, parent_pid, server_pid, current_fc_map) do
     case :gen_tcp.accept(listen) do
       {:ok, socket} ->
-        args = %{model_pid: model_pid, parent_pid: parent_pid, fc_map: fc_map}
+        latest_fc_map =
+          try do
+            GenServer.call(server_pid, :get_fc_map, 1_000)
+          catch
+            _, _ -> current_fc_map
+          end
+
+        args = %{model_pid: model_pid, parent_pid: parent_pid, fc_map: latest_fc_map}
         {:ok, handler} = DynamicSupervisor.start_child(sup, {Handler, {socket, args}})
         :ok = :gen_tcp.controlling_process(socket, handler)
         send(handler, :socket_ready)
-        accept_loop(listen, sup, model_pid, parent_pid, fc_map)
+        accept_loop(listen, sup, model_pid, parent_pid, server_pid, latest_fc_map)
 
       {:error, :closed} ->
         :ok
 
       {:error, _reason} ->
-        accept_loop(listen, sup, model_pid, parent_pid, fc_map)
+        accept_loop(listen, sup, model_pid, parent_pid, server_pid, current_fc_map)
     end
   end
 

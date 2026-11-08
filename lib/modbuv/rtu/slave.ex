@@ -58,6 +58,12 @@ defmodule Modbuv.Rtu.Slave do
   @spec raw_write(pid(), binary()) :: :ok
   def raw_write(pid, data), do: GenServer.call(pid, {:raw_write, data})
 
+  @doc "Updates the slave's function code mapping at runtime and updates the UART framer."
+  @spec set_fc_map(pid(), map()) :: :ok
+  def set_fc_map(pid, overrides) when is_map(overrides) do
+    GenServer.call(pid, {:set_fc_map, overrides})
+  end
+
   @impl true
   def init({params, parent_pid}) do
     active = Keyword.get(params, :active, false)
@@ -118,6 +124,16 @@ defmodule Modbuv.Rtu.Slave do
   def handle_call({:raw_write, data}, _from, state) do
     UART.write(state.uart_pid, data)
     {:reply, :ok, state}
+  end
+
+  def handle_call({:set_fc_map, overrides}, _from, state) do
+    new_fc_map = FcMap.merge(state.fc_map, overrides)
+
+    if state.status == :open and is_pid(state.uart_pid) and Process.alive?(state.uart_pid) do
+      UART.configure(state.uart_pid, framing: {Framer, fc_map: new_fc_map})
+    end
+
+    {:reply, :ok, %{state | fc_map: new_fc_map}}
   end
 
   @impl true
@@ -187,6 +203,7 @@ defmodule Modbuv.Rtu.Slave do
 
     if known_slave?(state.model_pid, slave) do
       send_response(state, Rtu.pack_exception(slave, fc, reason))
+      notify(state.parent_pid, {:slave_exception, raw, slave, fc, reason})
     end
   end
 

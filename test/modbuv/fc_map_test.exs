@@ -16,6 +16,16 @@ defmodule Modbuv.FcMapTest do
     assert FcMap.lookup(map, 16) == {:ok, {:w, :reg, :hr, :multi}}
   end
 
+  test "merge/2 incrementally merges on top of base map without dropping previous overrides" do
+    base = FcMap.merge(%{65 => {:r, :reg, :hr}})
+    assert FcMap.lookup(base, 65) == {:ok, {:r, :reg, :hr}}
+
+    updated = FcMap.merge(base, %{66 => {:w, :reg, :hr, :single}})
+    assert FcMap.lookup(updated, 65) == {:ok, {:r, :reg, :hr}}
+    assert FcMap.lookup(updated, 66) == {:ok, {:w, :reg, :hr, :single}}
+    assert FcMap.lookup(updated, 3) == {:ok, {:r, :reg, :hr}}
+  end
+
   test "invalid keys and shapes raise" do
     assert_raise ArgumentError, fn -> FcMap.merge(%{0 => {:r, :bit, :c}}) end
     assert_raise ArgumentError, fn -> FcMap.merge(%{128 => {:r, :bit, :c}}) end

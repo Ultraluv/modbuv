@@ -99,4 +99,58 @@ defmodule Modbuv.TcpServerTest do
       Process.flag(:trap_exit, old_trap)
     end
   end
+
+  test "set_fc_map updates mapping at runtime for active connections" do
+    {:ok, pid, port} = start_server()
+    {:ok, sock} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, packet: :raw, active: false])
+
+    # FC 65 is not registered initially -> returns exception 01 (:efun)
+    :ok = :gen_tcp.send(sock, Tcp.pack_req({1, {65, :r, :reg}, 0, 1}, 10))
+    resp1 = recv_adu(sock)
+    assert resp1 == Tcp.pack_exception(1, 65, :efun, 10)
+
+    # Runtime update fc_map
+    assert :ok = Server.set_fc_map(pid, %{65 => {:r, :reg, :hr}})
+
+    # Small delay to ensure handler received the broadcast
+    Process.sleep(20)
+
+    # Now FC 65 works over the same existing socket
+    :ok = :gen_tcp.send(sock, Tcp.pack_req({1, {65, :r, :reg}, 0, 1}, 11))
+    resp2 = recv_adu(sock)
+    assert Tcp.parse_res({1, {65, :r, :reg}, 0, 1}, resp2) == [10]
+
+    :gen_tcp.close(sock)
+    Server.stop(pid)
+  end
+
+  test "set_fc_map merges incrementally without dropping existing custom entries" do
+    {:ok, pid, _port} = start_server()
+
+    assert :ok = Server.set_fc_map(pid, %{65 => {:r, :reg, :hr}})
+    assert :ok = Server.set_fc_map(pid, %{66 => {:r, :reg, :hr}})
+
+    fc_map = GenServer.call(pid, :get_fc_map)
+    assert Map.has_key?(fc_map, 65)
+    assert Map.has_key?(fc_map, 66)
+    assert Map.has_key?(fc_map, 3)
+
+    Server.stop(pid)
+  end
+
+  test "notifies parent_pid with server_exception on invalid requests" do
+    {:ok, pid, port} = Server.start_link(port: 0, model: @model, active: true)
+    {:ok, actual_port} = :inet.port(:sys.get_state(pid).listen)
+    {:ok, sock} = :gen_tcp.connect({127, 0, 0, 1}, actual_port, [:binary, packet: :raw, active: false])
+
+    # Send unregistered function code 99
+    bad_req = Tcp.pack_req({1, {99, :r, :reg}, 0, 1}, 42)
+    :ok = :gen_tcp.send(sock, bad_req)
+    _resp = recv_adu(sock)
+
+    assert_receive {:modbuv_tcp, {:server_exception, ^bad_req, 1, 99, :efun, 42}}, 500
+
+    :gen_tcp.close(sock)
+    Server.stop(pid)
+  end
 end

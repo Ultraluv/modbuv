@@ -122,6 +122,26 @@ defmodule Modbuv.CodecParsingTest do
     assert Codec.parse_request(1, <<0x64, 0, 1, 0, 2>>, map) == {:ok, {1, {0x64, :r, :reg}, 1, 2}}
   end
 
+  test "custom write function code parses both single and multi write formats" do
+    map = FcMap.merge(%{0x65 => {:w, :reg, :hr, :multi}, 0x66 => {:w, :reg, :hr, :single}})
+
+    # 0x65 is declared as :multi, but can also parse single write PDU
+    assert Codec.parse_request(1, <<0x65, 0, 1, 0, 102>>, map) ==
+             {:ok, {1, {0x65, :w, :reg}, 1, 102}}
+
+    # 0x65 parses multi write PDU
+    assert Codec.parse_request(1, <<0x65, 0, 1, 0, 2, 4, 0, 102, 0, 103>>, map) ==
+             {:ok, {1, {0x65, :w, :reg}, 1, [102, 103]}}
+
+    # 0x66 is declared as :single, but can also parse multi write PDU
+    assert Codec.parse_request(1, <<0x66, 0, 1, 0, 2, 4, 0, 102, 0, 103>>, map) ==
+             {:ok, {1, {0x66, :w, :reg}, 1, [102, 103]}}
+
+    # 0x66 parses single write PDU
+    assert Codec.parse_request(1, <<0x66, 0, 1, 0, 102>>, map) ==
+             {:ok, {1, {0x66, :w, :reg}, 1, 102}}
+  end
+
   test "rejects malformed requests" do
     map = FcMap.default()
     assert Codec.parse_request(1, <<9, 0, 1, 0, 2>>, map) == {:error, :efun}

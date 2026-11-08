@@ -46,6 +46,10 @@ defmodule Modbuv.Tcp.Server.Handler do
     {:noreply, %{state | buffer: buffer}}
   end
 
+  def handle_info({:set_fc_map, new_fc_map}, state) when is_map(new_fc_map) do
+    {:noreply, %{state | fc_map: new_fc_map}}
+  end
+
   def handle_info({:tcp_closed, _socket}, state), do: {:stop, :normal, state}
   def handle_info({:tcp_error, _socket, _reason}, state), do: {:stop, :normal, state}
   def handle_info(_message, state), do: {:noreply, state}
@@ -61,6 +65,7 @@ defmodule Modbuv.Tcp.Server.Handler do
       {:error, reason, fc} ->
         if is_integer(fc) and fc in 1..127 and known_slave?(state.model_pid, unit) do
           send_exception(state.socket, unit, fc, reason, transid)
+          notify_exception(state.parent_pid, adu, unit, fc, reason, transid)
         end
     end
   end
@@ -100,4 +105,10 @@ defmodule Modbuv.Tcp.Server.Handler do
 
   defp notify(nil, _frame), do: :ok
   defp notify(pid, frame), do: send(pid, {:modbuv_tcp, {:server_request, frame}})
+
+  defp notify_exception(nil, _adu, _unit, _fc, _reason, _transid), do: :ok
+
+  defp notify_exception(pid, adu, unit, fc, reason, transid) do
+    send(pid, {:modbuv_tcp, {:server_exception, adu, unit, fc, reason, transid}})
+  end
 end
