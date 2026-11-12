@@ -8,7 +8,7 @@ defmodule Modbuv.Rtu.Slave do
 
   require Logger
 
-  alias Circuits.UART
+  alias Modbuv.Rtu.Transport
   alias Modbuv.{FcMap, Rtu}
   alias Modbuv.Model.Shared
   alias Modbuv.Rtu.Framer
@@ -17,6 +17,7 @@ defmodule Modbuv.Rtu.Slave do
             parent_pid: nil,
             tty: nil,
             uart_pid: nil,
+            transport: Transport.UART,
             uart_opts: [],
             fc_map: %{},
             status: :closed
@@ -76,11 +77,12 @@ defmodule Modbuv.Rtu.Slave do
     fc_map = FcMap.merge(Keyword.get(params, :fc_map, %{}))
     parent_pid = if active, do: parent_pid
 
+    transport = Transport.resolve_transport(params, tty)
     {:ok, model_pid} = Shared.start_link(model)
-    {:ok, uart_pid} = UART.start_link()
+    {:ok, uart_pid} = transport.start_link()
 
     status =
-      case UART.open(
+      case transport.open(
              uart_pid,
              tty,
              [framing: {Framer, fc_map: fc_map}, active: true] ++ uart_opts
@@ -94,6 +96,7 @@ defmodule Modbuv.Rtu.Slave do
       parent_pid: parent_pid,
       tty: tty,
       uart_pid: uart_pid,
+      transport: transport,
       uart_opts: uart_opts,
       fc_map: fc_map,
       status: status
@@ -122,7 +125,7 @@ defmodule Modbuv.Rtu.Slave do
   end
 
   def handle_call({:raw_write, data}, _from, state) do
-    UART.write(state.uart_pid, data)
+    state.transport.write(state.uart_pid, data)
     {:reply, :ok, state}
   end
 
@@ -130,7 +133,7 @@ defmodule Modbuv.Rtu.Slave do
     new_fc_map = FcMap.merge(state.fc_map, overrides)
 
     if state.status == :open and is_pid(state.uart_pid) and Process.alive?(state.uart_pid) do
-      UART.configure(state.uart_pid, framing: {Framer, fc_map: new_fc_map})
+      state.transport.configure(state.uart_pid, framing: {Framer, fc_map: new_fc_map})
     end
 
     {:reply, :ok, %{state | fc_map: new_fc_map}}
@@ -138,29 +141,29 @@ defmodule Modbuv.Rtu.Slave do
 
   @impl true
   def terminate(_reason, state) do
-    UART.close(state.uart_pid)
-    UART.stop(state.uart_pid)
+    state.transport.close(state.uart_pid)
+    state.transport.stop(state.uart_pid)
     Shared.stop(state.model_pid)
     :ok
   end
 
   @impl true
-  def handle_info({:circuits_uart, _device, frame}, state) when is_binary(frame) do
+  def handle_info({tag, _device, frame}, state) when tag in [:circuits_uart, :modbuv_transport] and is_binary(frame) do
     handle_frame(frame, state)
     {:noreply, state}
   end
 
-  def handle_info({:circuits_uart, _device, {:error, :ecrc, raw}}, state) do
+  def handle_info({tag, _device, {:error, :ecrc, raw}}, state) when tag in [:circuits_uart, :modbuv_transport] do
     notify(state.parent_pid, {:slave_error, raw, :ecrc})
     {:noreply, state}
   end
 
-  def handle_info({:circuits_uart, _device, {:error, reason, raw}}, state) do
+  def handle_info({tag, _device, {:error, reason, raw}}, state) when tag in [:circuits_uart, :modbuv_transport] do
     notify(state.parent_pid, {:slave_error, raw, reason})
     {:noreply, state}
   end
 
-  def handle_info({:circuits_uart, _device, {:partial, data}}, state) do
+  def handle_info({tag, _device, {:partial, data}}, state) when tag in [:circuits_uart, :modbuv_transport] do
     Logger.warning("Modbuv RTU slave partial frame: #{inspect(data, base: :hex)}")
     {:noreply, state}
   end
@@ -214,7 +217,7 @@ defmodule Modbuv.Rtu.Slave do
   end
 
   defp send_response(state, adu) do
-    case UART.write(state.uart_pid, adu) do
+    case state.transport.write(state.uart_pid, adu) do
       :ok -> :ok
       {:error, reason} -> Logger.warning("Modbuv RTU slave write failed: #{inspect(reason)}")
     end

@@ -203,7 +203,38 @@ Slave.stop(slave)
 
 ---
 
-### 5. Vendor Custom Function Codes (`FcMap`)
+### 5. In-Memory Virtual Bus & Pluggable Transports (Hardware-Free Testing)
+
+`modbuv` provides an in-memory RS-485 virtual bus and a pluggable transport layer (`Modbuv.Rtu.Transport`). You can run full end-to-end Modbus RTU tests and LiveView simulations in pure memory **without any physical serial ports, USB dongles, or OS-level `socat` pseudo-terminals**:
+
+```elixir
+alias Modbuv.Rtu.{Master, Slave}
+
+model = %{1 => %{{:hr, 0} => 10, {:hr, 1} => 20}}
+
+# 1. Start virtual slave on the shared in-memory bus
+{:ok, slave} = Slave.start_link(tty: "virtual", model: model)
+
+# 2. Start virtual master on the same bus
+{:ok, master} = Master.start_link(tty: "virtual")
+
+# 3. Read and write directly in pure memory!
+{:ok, [10, 20]} = Master.request(master, {1, {3, :r, :reg}, 0, 2})
+:ok = Master.request(master, {1, {6, :w, :reg}, 0, 99})
+{:ok, [99, 20]} = Master.request(master, {1, {3, :r, :reg}, 0, 2})
+
+# 4. Clean up
+Slave.stop(slave)
+Master.stop(master)
+```
+
+> **Multi-Bus Isolation**: Use `tty: "virtual:my_bus"` or `tty: "virtual:test_1"` to run concurrent, isolated virtual buses in parallel without cross-talk during testing.
+>
+> **Custom Transports**: Implement `@behaviour Modbuv.Rtu.Transport` and inject via `transport: MyTransport`.
+
+---
+
+### 6. Vendor Custom Function Codes (`FcMap`)
 
 For Server and Slave roles, function codes are mapped to memory regions using `Modbuv.FcMap`. You can register custom function codes during startup or update them dynamically at runtime:
 
@@ -231,7 +262,7 @@ custom_map = %{
 
 ---
 
-### 6. Helpers
+### 7. Helpers
 
 #### IEEE754 Float Conversion
 
@@ -258,7 +289,7 @@ Modbuv.CRC.crc(<<0x01, 0x03, 0x00, 0x00, 0x00, 0x01>>) # => 0x0A84
 
 ---
 
-### 7. Telemetry
+### 8. Telemetry
 
 TCP Client and RTU Master requests emit `[:modbuv, :request, :start]` and
 `[:modbuv, :request, :stop]` events:

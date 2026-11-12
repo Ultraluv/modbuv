@@ -1,8 +1,8 @@
 defmodule Modbuv.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
-  @source_url "https://github.com/ultra0224/modbuv"
+  @version "0.1.2"
+  @source_url "https://github.com/Ultraluv/modbuv"
 
   def project do
     [

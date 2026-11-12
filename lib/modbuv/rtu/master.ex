@@ -6,20 +6,21 @@ defmodule Modbuv.Rtu.Master do
 
   use GenServer
 
-  alias Circuits.UART
-  alias Modbuv.{Rtu, Telemetry}
+  alias Modbuv.Rtu.{Transport, Telemetry}
+  alias Modbuv.Rtu
 
   defstruct parent_pid: nil,
             tty: nil,
             active: false,
             uart_pid: nil,
+            transport: Transport.UART,
             timeout: 5_000,
             uart_opts: [],
             status: :closed,
             cmd: nil,
             last_cmd: nil
 
-  @doc "Starts the RTU master GenServer. `params` must include `:tty` and may include `:active`, `:timeout`, and `:uart_opts`."
+  @doc "Starts the RTU master GenServer. `params` must include `:tty` and may include `:active`, `:timeout`, `:uart_opts`, and `:transport`."
   @spec start_link(keyword(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(params, gen_opts \\ []) do
     GenServer.start_link(__MODULE__, {params, self()}, gen_opts)
@@ -33,7 +34,7 @@ defmodule Modbuv.Rtu.Master do
   @spec state(pid()) :: %__MODULE__{}
   def state(pid), do: GenServer.call(pid, :state)
 
-  @doc "Updates the master's connection parameters (`:tty`, `:active`, `:timeout`, `:uart_opts`) at runtime, reopening the UART port."
+  @doc "Updates the master's connection parameters (`:tty`, `:active`, `:timeout`, `:uart_opts`, `:transport`) at runtime, reopening the UART port."
   @spec configure(pid(), keyword()) :: :ok
   def configure(pid, params), do: GenServer.call(pid, {:configure, params})
 
@@ -64,14 +65,16 @@ defmodule Modbuv.Rtu.Master do
     uart_opts = Keyword.get(params, :uart_opts, speed: 115_200)
     parent_pid = if active, do: parent_pid
 
-    {:ok, uart_pid} = UART.start_link()
-    status = open_uart(uart_pid, tty, uart_opts)
+    transport = Transport.resolve_transport(params, tty)
+    {:ok, uart_pid} = transport.start_link()
+    status = open_uart(transport, uart_pid, tty, uart_opts)
 
     state = %__MODULE__{
       parent_pid: parent_pid,
       tty: tty,
       active: active,
       uart_pid: uart_pid,
+      transport: transport,
       timeout: timeout,
       uart_opts: uart_opts,
       status: status
@@ -84,11 +87,11 @@ defmodule Modbuv.Rtu.Master do
   def handle_call(:state, _from, state), do: {:reply, state, state}
 
   def handle_call(:open, _from, %__MODULE__{} = state) do
-    {:reply, :ok, %{state | status: open_uart(state.uart_pid, state.tty, state.uart_opts)}}
+    {:reply, :ok, %{state | status: open_uart(state.transport, state.uart_pid, state.tty, state.uart_opts)}}
   end
 
   def handle_call(:close, _from, %__MODULE__{} = state) do
-    UART.close(state.uart_pid)
+    state.transport.close(state.uart_pid)
     {:reply, :ok, %{state | status: :closed, cmd: nil, last_cmd: nil}}
   end
 
@@ -105,22 +108,23 @@ defmodule Modbuv.Rtu.Master do
     metadata = Telemetry.request_metadata(:rtu, :master, mode(state), frame)
     started = Telemetry.start(metadata)
 
-    with :ok <- UART.flush(state.uart_pid),
-         :ok <- UART.write(state.uart_pid, adu) do
+    with :ok <- state.transport.flush(state.uart_pid),
+         :ok <- state.transport.write(state.uart_pid, adu) do
       if state.active do
         master = self()
         uart_pid = state.uart_pid
+        transport = state.transport
         timeout = state.timeout
 
         Task.start_link(fn ->
-          result = read_reply(uart_pid, frame, timeout)
+          result = read_reply(transport, uart_pid, frame, timeout)
           Telemetry.stop(metadata, started, result)
           send(master, {:async_done, frame, result})
         end)
 
         {:reply, :ok, %{state | cmd: frame}}
       else
-        result = read_reply(state.uart_pid, frame, state.timeout)
+        result = read_reply(state.transport, state.uart_pid, frame, state.timeout)
         Telemetry.stop(metadata, started, result)
         {:reply, result, %{state | cmd: nil, last_cmd: frame}}
       end
@@ -135,12 +139,12 @@ defmodule Modbuv.Rtu.Master do
   def handle_call(:read, _from, %__MODULE__{last_cmd: nil} = state), do: {:reply, nil, state}
 
   def handle_call(:read, _from, state) do
-    {:reply, read_reply(state.uart_pid, state.last_cmd, state.timeout), state}
+    {:reply, read_reply(state.transport, state.uart_pid, state.last_cmd, state.timeout), state}
   end
 
   def handle_call({:configure, params}, {caller, _ref}, %__MODULE__{} = state) do
-    UART.close(state.uart_pid)
-    UART.stop(state.uart_pid)
+    state.transport.close(state.uart_pid)
+    state.transport.stop(state.uart_pid)
 
     active = if params[:active] == nil, do: state.active, else: params[:active]
     tty = params[:tty] || state.tty
@@ -148,8 +152,9 @@ defmodule Modbuv.Rtu.Master do
     uart_opts = params[:uart_opts] || state.uart_opts
     parent_pid = if active and state.parent_pid == nil, do: caller, else: state.parent_pid
 
-    {:ok, uart_pid} = UART.start_link()
-    status = open_uart(uart_pid, tty, uart_opts)
+    transport = Transport.resolve_transport(params, tty)
+    {:ok, uart_pid} = transport.start_link()
+    status = open_uart(transport, uart_pid, tty, uart_opts)
 
     new_state = %__MODULE__{
       state
@@ -157,6 +162,7 @@ defmodule Modbuv.Rtu.Master do
         tty: tty,
         active: active,
         uart_pid: uart_pid,
+        transport: transport,
         timeout: timeout,
         uart_opts: uart_opts,
         status: status,
@@ -177,17 +183,17 @@ defmodule Modbuv.Rtu.Master do
 
   @impl true
   def terminate(_reason, %__MODULE__{} = state) do
-    UART.close(state.uart_pid)
-    UART.stop(state.uart_pid)
+    state.transport.close(state.uart_pid)
+    state.transport.stop(state.uart_pid)
     :ok
   end
 
-  defp read_reply(uart_pid, frame, timeout) do
+  defp read_reply(transport, uart_pid, frame, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    read_loop(uart_pid, frame, <<>>, deadline)
+    read_loop(transport, uart_pid, frame, <<>>, deadline)
   end
 
-  defp read_loop(uart_pid, frame, buffer, deadline) do
+  defp read_loop(transport, uart_pid, frame, buffer, deadline) do
     case Rtu.response_length(frame, buffer) do
       {:ok, length} when byte_size(buffer) >= length ->
         adu = binary_part(buffer, 0, length)
@@ -199,34 +205,34 @@ defmodule Modbuv.Rtu.Master do
         end
 
       {:ok, _length} ->
-        continue_read(uart_pid, frame, buffer, deadline)
+        continue_read(transport, uart_pid, frame, buffer, deadline)
 
       :more ->
-        continue_read(uart_pid, frame, buffer, deadline)
+        continue_read(transport, uart_pid, frame, buffer, deadline)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp continue_read(uart_pid, frame, buffer, deadline) do
+  defp continue_read(transport, uart_pid, frame, buffer, deadline) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
       {:error, :timeout}
     else
-      case UART.read(uart_pid, remaining) do
+      case transport.read(uart_pid, remaining) do
         {:ok, ""} -> {:error, :timeout}
         {:ok, {:error, reason, _message}} -> {:error, reason}
-        {:ok, {:partial, data}} -> read_loop(uart_pid, frame, buffer <> data, deadline)
-        {:ok, data} when is_binary(data) -> read_loop(uart_pid, frame, buffer <> data, deadline)
+        {:ok, {:partial, data}} -> read_loop(transport, uart_pid, frame, buffer <> data, deadline)
+        {:ok, data} when is_binary(data) -> read_loop(transport, uart_pid, frame, buffer <> data, deadline)
         {:error, reason} -> {:error, reason}
       end
     end
   end
 
-  defp open_uart(uart_pid, tty, uart_opts) do
-    case UART.open(uart_pid, tty, [active: false] ++ uart_opts) do
+  defp open_uart(transport, uart_pid, tty, uart_opts) do
+    case transport.open(uart_pid, tty, [active: false] ++ uart_opts) do
       :ok -> :open
       {:error, _reason} -> :closed
     end
