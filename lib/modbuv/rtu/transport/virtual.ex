@@ -70,7 +70,7 @@ defmodule Modbuv.Rtu.Transport.Virtual do
   end
 
   @impl true
-  def handle_call({:open, tty, opts}, {caller, _ref}, state) do
+  def handle_call({:open, tty, opts}, {caller, _ref}, %__MODULE__{} = state) do
     bus = resolve_bus(tty, opts)
     active = Keyword.get(opts, :active, false)
     {framing_mod, framing_state} = init_framing(opts[:framing])
@@ -96,7 +96,7 @@ defmodule Modbuv.Rtu.Transport.Virtual do
     end
   end
 
-  def handle_call(:close, _from, state) do
+  def handle_call(:close, _from, %__MODULE__{} = state) do
     if state.bus, do: VirtualBus.detach(state.bus, self())
     cancel_waiting_reader(state)
     {:reply, :ok, %__MODULE__{state | bus: nil, rx_buffer: <<>>, waiting_reader: nil}}
@@ -130,7 +130,7 @@ defmodule Modbuv.Rtu.Transport.Virtual do
     end
   end
 
-  def handle_call({:flush, direction}, _from, state) do
+  def handle_call({:flush, direction}, _from, %__MODULE__{} = state) do
     new_framing_state =
       if state.framing && function_exported?(state.framing, :flush, 2) do
         state.framing.flush(direction, state.framing_state)
@@ -141,7 +141,7 @@ defmodule Modbuv.Rtu.Transport.Virtual do
     {:reply, :ok, %{state | rx_buffer: <<>>, framing_state: new_framing_state}}
   end
 
-  def handle_call({:configure, opts}, _from, state) do
+  def handle_call({:configure, opts}, _from, %__MODULE__{} = state) do
     new_state =
       if Keyword.has_key?(opts, :framing) do
         {framing_mod, framing_state} = init_framing(opts[:framing])
@@ -245,9 +245,7 @@ defmodule Modbuv.Rtu.Transport.Virtual do
   end
 
   defp send_to_owner(owner, tty, term) when is_pid(owner) do
-    # Deliver using both :circuits_uart and :modbuv_transport tags for maximum compatibility
     send(owner, {:circuits_uart, tty, term})
-    send(owner, {:modbuv_transport, tty, term})
   end
 
   defp send_to_owner(_owner, _tty, _term), do: :ok
@@ -258,4 +256,3 @@ defmodule Modbuv.Rtu.Transport.Virtual do
 
   defp cancel_waiting_reader(_state), do: :ok
 end
-

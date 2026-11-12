@@ -68,4 +68,3 @@ defmodule Modbuv.Rtu.Transport.VirtualTest do
     Virtual.stop(v)
   end
 end
-

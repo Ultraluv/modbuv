@@ -47,4 +47,3 @@ defmodule Modbuv.Rtu.Transport.UART do
     UART.stop(pid)
   end
 end
-

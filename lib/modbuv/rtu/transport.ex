@@ -74,4 +74,3 @@ defmodule Modbuv.Rtu.Transport do
   def virtual_tty?("loopback:" <> _), do: true
   def virtual_tty?(_other), do: false
 end
-

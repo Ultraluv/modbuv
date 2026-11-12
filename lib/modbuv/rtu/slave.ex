@@ -148,22 +148,26 @@ defmodule Modbuv.Rtu.Slave do
   end
 
   @impl true
-  def handle_info({tag, _device, frame}, state) when tag in [:circuits_uart, :modbuv_transport] and is_binary(frame) do
+  def handle_info({tag, _device, frame}, state)
+      when tag in [:circuits_uart, :modbuv_transport] and is_binary(frame) do
     handle_frame(frame, state)
     {:noreply, state}
   end
 
-  def handle_info({tag, _device, {:error, :ecrc, raw}}, state) when tag in [:circuits_uart, :modbuv_transport] do
+  def handle_info({tag, _device, {:error, :ecrc, raw}}, state)
+      when tag in [:circuits_uart, :modbuv_transport] do
     notify(state.parent_pid, {:slave_error, raw, :ecrc})
     {:noreply, state}
   end
 
-  def handle_info({tag, _device, {:error, reason, raw}}, state) when tag in [:circuits_uart, :modbuv_transport] do
+  def handle_info({tag, _device, {:error, reason, raw}}, state)
+      when tag in [:circuits_uart, :modbuv_transport] do
     notify(state.parent_pid, {:slave_error, raw, reason})
     {:noreply, state}
   end
 
-  def handle_info({tag, _device, {:partial, data}}, state) when tag in [:circuits_uart, :modbuv_transport] do
+  def handle_info({tag, _device, {:partial, data}}, state)
+      when tag in [:circuits_uart, :modbuv_transport] do
     Logger.warning("Modbuv RTU slave partial frame: #{inspect(data, base: :hex)}")
     {:noreply, state}
   end

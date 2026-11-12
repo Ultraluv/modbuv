@@ -132,4 +132,3 @@ defmodule Modbuv.Rtu.VirtualBus do
   defp resolve_pid(bus) when is_atom(bus), do: Process.whereis(bus)
   defp resolve_pid(_), do: nil
 end
-

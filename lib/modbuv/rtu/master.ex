@@ -6,8 +6,8 @@ defmodule Modbuv.Rtu.Master do
 
   use GenServer
 
-  alias Modbuv.Rtu.{Transport, Telemetry}
-  alias Modbuv.Rtu
+  alias Modbuv.Rtu.Transport
+  alias Modbuv.{Rtu, Telemetry}
 
   defstruct parent_pid: nil,
             tty: nil,
@@ -87,7 +87,8 @@ defmodule Modbuv.Rtu.Master do
   def handle_call(:state, _from, state), do: {:reply, state, state}
 
   def handle_call(:open, _from, %__MODULE__{} = state) do
-    {:reply, :ok, %{state | status: open_uart(state.transport, state.uart_pid, state.tty, state.uart_opts)}}
+    {:reply, :ok,
+     %{state | status: open_uart(state.transport, state.uart_pid, state.tty, state.uart_opts)}}
   end
 
   def handle_call(:close, _from, %__MODULE__{} = state) do
@@ -222,11 +223,20 @@ defmodule Modbuv.Rtu.Master do
       {:error, :timeout}
     else
       case transport.read(uart_pid, remaining) do
-        {:ok, ""} -> {:error, :timeout}
-        {:ok, {:error, reason, _message}} -> {:error, reason}
-        {:ok, {:partial, data}} -> read_loop(transport, uart_pid, frame, buffer <> data, deadline)
-        {:ok, data} when is_binary(data) -> read_loop(transport, uart_pid, frame, buffer <> data, deadline)
-        {:error, reason} -> {:error, reason}
+        {:ok, ""} ->
+          {:error, :timeout}
+
+        {:ok, {:error, reason, _message}} ->
+          {:error, reason}
+
+        {:ok, {:partial, data}} ->
+          read_loop(transport, uart_pid, frame, buffer <> data, deadline)
+
+        {:ok, data} when is_binary(data) ->
+          read_loop(transport, uart_pid, frame, buffer <> data, deadline)
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end

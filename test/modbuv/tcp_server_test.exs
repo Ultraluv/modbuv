@@ -139,9 +139,10 @@ defmodule Modbuv.TcpServerTest do
   end
 
   test "notifies parent_pid with server_exception on invalid requests" do
-    {:ok, pid, port} = Server.start_link(port: 0, model: @model, active: true)
-    {:ok, actual_port} = :inet.port(:sys.get_state(pid).listen)
-    {:ok, sock} = :gen_tcp.connect({127, 0, 0, 1}, actual_port, [:binary, packet: :raw, active: false])
+    {:ok, pid, actual_port} = start_server(active: true)
+
+    {:ok, sock} =
+      :gen_tcp.connect({127, 0, 0, 1}, actual_port, [:binary, packet: :raw, active: false])
 
     # Send unregistered function code 99
     bad_req = Tcp.pack_req({1, {99, :r, :reg}, 0, 1}, 42)

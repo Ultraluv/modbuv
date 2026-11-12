@@ -32,11 +32,13 @@ defmodule Modbuv.Rtu.VirtualBusTest do
     {:ok, bus} = VirtualBus.start_link(name: bus_name)
 
     me = self()
-    p2 = spawn(fn ->
-      receive do
-        {:virtual_bus_data, sender, data} -> send(me, {:p2_got, sender, data})
-      end
-    end)
+
+    p2 =
+      spawn(fn ->
+        receive do
+          {:virtual_bus_data, sender, data} -> send(me, {:p2_got, sender, data})
+        end
+      end)
 
     VirtualBus.attach(bus, self())
     VirtualBus.attach(bus, p2)
@@ -66,4 +68,3 @@ defmodule Modbuv.Rtu.VirtualBusTest do
     assert VirtualBus.peers(bus) == []
   end
 end
-

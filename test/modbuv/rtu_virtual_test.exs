@@ -87,5 +87,33 @@ defmodule Modbuv.RtuVirtualTest do
     Slave.stop(slave)
     Master.stop(master)
   end
-end
 
+  def handle_telemetry(event, measurements, metadata, config) do
+    send(config.test_pid, {:telemetry_event, event, measurements, metadata})
+  end
+
+  test "emits telemetry events during virtual bus request", %{tty: tty} do
+    test_pid = self()
+    handler_id = "test-virtual-telemetry-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:modbuv, :request, :stop],
+      &__MODULE__.handle_telemetry/4,
+      %{test_pid: test_pid}
+    )
+
+    {:ok, slave} = Slave.start_link(tty: tty, model: @model)
+    {:ok, master} = Master.start_link(tty: tty, timeout: 1_000)
+
+    assert {:ok, [10, 11]} = Master.request(master, {1, {3, :r, :reg}, 0, 2})
+
+    assert_receive {:telemetry_event, [:modbuv, :request, :stop], %{duration: _},
+                    %{role: :master, transport: :rtu, result: :ok}},
+                   500
+
+    :telemetry.detach(handler_id)
+    Slave.stop(slave)
+    Master.stop(master)
+  end
+end

@@ -68,7 +68,9 @@ defmodule Modbuv.Tcp.Server do
         server_pid = self()
 
         {:ok, acceptor} =
-          Task.start_link(fn -> accept_loop(listen, sup, model_pid, parent_pid, server_pid, fc_map) end)
+          Task.start_link(fn ->
+            accept_loop(listen, sup, model_pid, parent_pid, server_pid, fc_map)
+          end)
 
         state = %{
           port: actual_port,

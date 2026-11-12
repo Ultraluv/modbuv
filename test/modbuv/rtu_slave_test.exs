@@ -71,7 +71,8 @@ defmodule Modbuv.RtuSlaveTest do
   end
 
   test "notifies parent_pid with slave_exception on invalid request" do
-    {:ok, pid} = Slave.start_link(tty: "/dev/null", model: @model, active: true)
+    bus_name = "slave_test_#{System.unique_integer([:positive])}"
+    {:ok, pid} = Slave.start_link(tty: "virtual:#{bus_name}", model: @model, active: true)
 
     # Directly feed an invalid request frame (FC 99 unregistered) through handle_info
     raw_req = Modbuv.Rtu.pack_req({1, {99, :r, :reg}, 0, 1})
