@@ -84,7 +84,7 @@ defmodule Modbuv.TcpClientTest do
     :gen_tcp.close(listen)
   end
 
-  test "passive timeout closes the client and does not reuse a stale response" do
+  test "passive timeout keeps the socket open and drains stale response on subsequent request" do
     {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(listen)
 
@@ -92,13 +92,43 @@ defmodule Modbuv.TcpClientTest do
     :ok = Client.connect(c)
     {:ok, sock} = :gen_tcp.accept(listen)
 
+    # 1. First request times out (slave does not reply in time)
     assert :ok = Client.request(c, {1, {3, :r, :reg}, 0, 1})
     assert {:error, :timeout} = Client.confirmation(c)
 
-    _ = :gen_tcp.send(sock, Tcp.pack_res({1, {3, :r, :reg}, 0, 1}, [111], 0))
-    assert {:error, :closed} = Client.request(c, {1, {3, :r, :reg}, 5, 1})
+    # 2. Connection remains open and connected
+    assert %{status: :connected} = Client.state(c)
+
+    # 3. Subsequent request for another unit succeeds on the same connection
+    assert :ok = Client.request(c, {2, {3, :r, :reg}, 5, 1})
+
+    # 4. Server sends stale response for req 1 (transid 0), then response for req 2 (transid 1)
+    :ok = :gen_tcp.send(sock, Tcp.pack_res({1, {3, :r, :reg}, 0, 1}, [111], 0))
+    :ok = :gen_tcp.send(sock, Tcp.pack_res({2, {3, :r, :reg}, 5, 1}, [222], 1))
+
+    # 5. Client drains the stale response and returns response for request 2
+    assert {:ok, [222]} = Client.confirmation(c)
 
     :gen_tcp.close(sock)
     :gen_tcp.close(listen)
+    Client.stop(c)
+  end
+
+  test "passive confirmation closes the client on real TCP disconnect" do
+    {:ok, listen} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+    {:ok, port} = :inet.port(listen)
+
+    {:ok, c} = Client.start_link(ip: {127, 0, 0, 1}, tcp_port: port, timeout: 500)
+    :ok = Client.connect(c)
+    {:ok, sock} = :gen_tcp.accept(listen)
+
+    assert :ok = Client.request(c, {1, {3, :r, :reg}, 0, 1})
+    :gen_tcp.close(sock)
+
+    assert {:error, :closed} = Client.confirmation(c)
+    assert %{status: :closed} = Client.state(c)
+
+    :gen_tcp.close(listen)
+    Client.stop(c)
   end
 end

@@ -169,30 +169,8 @@ defmodule Modbuv.Tcp.Client do
   end
 
   def handle_call(:confirmation, _from, state) do
-    case :gen_tcp.recv(state.socket, 6, state.timeout) do
-      {:ok, <<transid::16, protocol::16, length::16>>}
-      when protocol == 0 and length >= 2 and transid == state.sent_transid ->
-        case :gen_tcp.recv(state.socket, length, state.timeout) do
-          {:ok, body} ->
-            adu = <<transid::16, protocol::16, length::16, body::binary>>
-            result = parse_result(Tcp.parse_res(state.cmd, adu))
-            stop_passive(state, result)
-            new_state = %{state | cmd: nil, sent_transid: nil, req_started_at: nil}
-            {:reply, result, new_state}
-
-          {:error, reason} ->
-            stop_passive(state, {:error, reason})
-            {:reply, {:error, reason}, close_socket(state)}
-        end
-
-      {:ok, _bad_header} ->
-        stop_passive(state, {:error, :ebadresp})
-        {:reply, {:error, :ebadresp}, close_socket(state)}
-
-      {:error, reason} ->
-        stop_passive(state, {:error, reason})
-        {:reply, {:error, reason}, close_socket(state)}
-    end
+    deadline = deadline(state.timeout)
+    recv_confirmation(state, deadline)
   end
 
   def handle_call(:flush, _from, state) do
@@ -260,6 +238,87 @@ defmodule Modbuv.Tcp.Client do
       state.req_started_at,
       result
     )
+  end
+
+  defp deadline(:infinity), do: :infinity
+
+  defp deadline(timeout) when is_integer(timeout),
+    do: System.monotonic_time(:millisecond) + timeout
+
+  defp time_remaining(:infinity), do: :infinity
+
+  defp time_remaining(deadline) when is_integer(deadline) do
+    max(deadline - System.monotonic_time(:millisecond), 0)
+  end
+
+  defp recv_confirmation(state, deadline) do
+    remaining = time_remaining(deadline)
+
+    if remaining != :infinity and remaining <= 0 do
+      stop_passive(state, {:error, :timeout})
+      new_state = %{state | cmd: nil, sent_transid: nil, req_started_at: nil}
+      {:reply, {:error, :timeout}, new_state}
+    else
+      case :gen_tcp.recv(state.socket, 6, remaining) do
+        {:ok, <<transid::16, protocol::16, length::16>>}
+        when protocol == 0 and length >= 2 and transid == state.sent_transid ->
+          body_remaining = time_remaining(deadline)
+
+          case :gen_tcp.recv(state.socket, length, body_remaining) do
+            {:ok, body} ->
+              adu = <<transid::16, protocol::16, length::16, body::binary>>
+              result = parse_result(Tcp.parse_res(state.cmd, adu))
+              stop_passive(state, result)
+              new_state = %{state | cmd: nil, sent_transid: nil, req_started_at: nil}
+              {:reply, result, new_state}
+
+            {:error, :timeout} ->
+              # Partial read: header already consumed, but body timed out.
+              # Stream alignment broken, must close socket.
+              stop_passive(state, {:error, :timeout})
+              {:reply, {:error, :timeout}, close_socket(state)}
+
+            {:error, reason} ->
+              stop_passive(state, {:error, reason})
+              {:reply, {:error, reason}, close_socket(state)}
+          end
+
+        {:ok, <<transid::16, protocol::16, length::16>>}
+        when protocol == 0 and length >= 2 and transid != state.sent_transid ->
+          # Stale response from a previously timed-out request.
+          # Drain the stale body to keep the stream aligned, then continue waiting for current transid.
+          body_remaining = time_remaining(deadline)
+
+          case :gen_tcp.recv(state.socket, length, body_remaining) do
+            {:ok, _stale_body} ->
+              recv_confirmation(state, deadline)
+
+            {:error, :timeout} ->
+              stop_passive(state, {:error, :timeout})
+              {:reply, {:error, :timeout}, close_socket(state)}
+
+            {:error, reason} ->
+              stop_passive(state, {:error, reason})
+              {:reply, {:error, reason}, close_socket(state)}
+          end
+
+        {:ok, _bad_header} ->
+          # Corrupted header - stream framing is invalid, must close socket
+          stop_passive(state, {:error, :ebadresp})
+          {:reply, {:error, :ebadresp}, close_socket(state)}
+
+        {:error, :timeout} ->
+          # Slave/server response timeout on header read (0 bytes read from socket).
+          # TCP connection remains healthy; do NOT close the socket.
+          stop_passive(state, {:error, :timeout})
+          new_state = %{state | cmd: nil, sent_transid: nil, req_started_at: nil}
+          {:reply, {:error, :timeout}, new_state}
+
+        {:error, reason} ->
+          stop_passive(state, {:error, reason})
+          {:reply, {:error, reason}, close_socket(state)}
+      end
+    end
   end
 
   defp parse_result(nil), do: :ok
