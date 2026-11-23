@@ -6,7 +6,8 @@ defmodule Modbuv.Rtu do
   alias Modbuv.{Codec, CRC}
 
   @spec pack_req(tuple()) :: binary()
-  def pack_req({slave, _, _, _} = frame) do
+  def pack_req({slave, {_fc, direction, _width}, _, _} = frame) do
+    validate_req_slave!(slave, direction)
     adu = wrap(slave, Codec.pack_request(frame))
     validate_req!(frame, adu)
     adu
@@ -14,6 +15,7 @@ defmodule Modbuv.Rtu do
 
   @spec pack_res(tuple(), list() | nil) :: binary()
   def pack_res({slave, _, _, _} = frame, values) do
+    validate_unicast_slave!(slave)
     adu = wrap(slave, Codec.pack_response(frame, values))
 
     if byte_size(adu) > 256,
@@ -22,8 +24,9 @@ defmodule Modbuv.Rtu do
     adu
   end
 
-  @spec pack_exception(0..255, 1..127, atom()) :: binary()
+  @spec pack_exception(1..247, 1..127, atom()) :: binary()
   def pack_exception(slave, fc, reason) do
+    validate_unicast_slave!(slave)
     wrap(slave, Codec.pack_exception(fc, reason))
   end
 
@@ -52,27 +55,31 @@ defmodule Modbuv.Rtu do
   end
 
   @spec response_length(tuple(), binary()) :: {:ok, pos_integer()} | :more | {:error, term()}
-  def response_length({_slave, {fc, :w, _width}, _address, _argument}, received) do
+  def response_length({slave, {fc, :w, _width}, _address, _argument}, received) do
     case received do
-      <<_slave, got_fc, _rest::binary>> when got_fc == fc + 0x80 -> {:ok, 5}
-      <<_slave, got_fc, _rest::binary>> when got_fc == fc -> {:ok, 8}
-      <<_slave, _got_fc, _rest::binary>> -> {:error, :ebadresp}
+      <<^slave, got_fc, _rest::binary>> when got_fc == fc + 0x80 -> {:ok, 5}
+      <<^slave, got_fc, _rest::binary>> when got_fc == fc -> {:ok, 8}
+      <<^slave, _got_fc, _rest::binary>> -> {:error, :ebadresp}
+      <<other_slave, _rest::binary>> when other_slave != slave -> {:error, :ebadresp}
       _ -> :more
     end
   end
 
-  def response_length({_slave, {fc, :r, width}, _address, count}, received) do
+  def response_length({slave, {fc, :r, width}, _address, count}, received) do
     case received do
-      <<_slave, got_fc, _rest::binary>> when got_fc == fc + 0x80 ->
+      <<^slave, got_fc, _rest::binary>> when got_fc == fc + 0x80 ->
         {:ok, 5}
 
-      <<_slave, got_fc, _rest::binary>> when got_fc != fc ->
+      <<^slave, got_fc, _rest::binary>> when got_fc != fc ->
         {:error, :ebadresp}
 
-      <<_slave, ^fc, byte_count, _rest::binary>> ->
+      <<^slave, ^fc, byte_count, _rest::binary>> ->
         if byte_count == expected_byte_count(width, count),
           do: {:ok, 5 + byte_count},
           else: {:error, :ebadresp}
+
+      <<other_slave, _rest::binary>> when other_slave != slave ->
+        {:error, :ebadresp}
 
       _ ->
         :more
@@ -101,8 +108,25 @@ defmodule Modbuv.Rtu do
   defp expected_byte_count(:reg, count), do: 2 * count
 
   defp validate_slave!(slave) do
-    unless is_integer(slave) and slave in 0..255,
-      do: raise(ArgumentError, "slave must be an integer in 0..255")
+    unless is_integer(slave) and slave in 0..247,
+      do: raise(ArgumentError, "RTU slave must be an integer in 0..247")
+  end
+
+  defp validate_req_slave!(slave, :w) do
+    unless is_integer(slave) and slave in 0..247,
+      do: raise(ArgumentError, "RTU write slave must be an integer in 0..247")
+  end
+
+  defp validate_req_slave!(slave, :r) do
+    unless is_integer(slave) and slave in 1..247,
+      do: raise(ArgumentError, "RTU read slave must be an integer in 1..247")
+  end
+
+  defp validate_req_slave!(slave, _direction), do: validate_slave!(slave)
+
+  defp validate_unicast_slave!(slave) do
+    unless is_integer(slave) and slave in 1..247,
+      do: raise(ArgumentError, "RTU slave must be an integer in 1..247")
   end
 
   defp unwrap(adu) when byte_size(adu) >= 4 do

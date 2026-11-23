@@ -116,4 +116,66 @@ defmodule Modbuv.RtuVirtualTest do
     Slave.stop(slave)
     Master.stop(master)
   end
+
+  test "master discards stale other-slave frames and leading noise before valid reply", %{
+    tty: tty
+  } do
+    bus_name = String.replace_prefix(tty, "virtual:", "") |> String.to_atom()
+    :ok = Modbuv.Rtu.VirtualBus.attach(bus_name, self())
+
+    {:ok, master} = Master.start_link(tty: tty, timeout: 1_000)
+
+    req = {2, {3, :r, :reg}, 0, 2}
+    task = Task.async(fn -> Master.request(master, req) end)
+
+    assert_receive {:virtual_bus_data, _sender, _req_adu}, 500
+
+    # Inject:
+    # 1. Stale reply from slave 1 with same FC and byte count
+    # 2. Stale reply from slave 1 with different FC
+    # 3. Leading noise bytes (including accidental slave 2 + fc 3 prefix with bad CRC)
+    # 4. Valid reply from slave 2
+    stale_same_fc = Modbuv.Rtu.pack_res({1, {3, :r, :reg}, 0, 2}, [10, 11])
+    stale_other_fc = Modbuv.Rtu.pack_res({1, {6, :w, :reg}, 0, 99}, nil)
+    noise = <<0xFF, 0x00, 2, 3, 4, 0, 0, 0, 0, 0, 0>>
+    valid_reply = Modbuv.Rtu.pack_res(req, [200, 201])
+
+    Modbuv.Rtu.VirtualBus.broadcast(bus_name, self(), stale_same_fc <> stale_other_fc)
+    Modbuv.Rtu.VirtualBus.broadcast(bus_name, self(), noise <> valid_reply)
+
+    assert {:ok, [200, 201]} = Task.await(task, 1_000)
+
+    Modbuv.Rtu.VirtualBus.detach(bus_name, self())
+    Master.stop(master)
+  end
+
+  test "broadcast write (slave 0) returns :ok immediately without waiting for timeout", %{
+    tty: tty
+  } do
+    bus_name = String.replace_prefix(tty, "virtual:", "") |> String.to_atom()
+    :ok = Modbuv.Rtu.VirtualBus.attach(bus_name, self())
+
+    {:ok, master} = Master.start_link(tty: tty, timeout: 5_000)
+
+    broadcast_req = {0, {6, :w, :reg}, 0, 123}
+    expected_adu = Modbuv.Rtu.pack_req(broadcast_req)
+
+    started = System.monotonic_time(:millisecond)
+    assert :ok = Master.request(master, broadcast_req)
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert elapsed < 500
+    assert_receive {:virtual_bus_data, _sender, ^expected_adu}, 500
+
+    # Broadcast write in active mode with turnaround_delay
+    {:ok, active_master} =
+      Master.start_link(tty: tty, active: true, timeout: 5_000, turnaround_delay: 10)
+
+    assert :ok = Master.request(active_master, broadcast_req)
+    assert_receive {:modbuv_rtu, {:slave_response, ^broadcast_req, :ok}}, 500
+
+    Modbuv.Rtu.VirtualBus.detach(bus_name, self())
+    Master.stop(master)
+    Master.stop(active_master)
+  end
 end

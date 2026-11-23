@@ -42,6 +42,11 @@ defmodule Modbuv.RtuTest do
     assert Rtu.response_length(@read, <<1, 0x83, 2>>) == {:ok, 5}
     assert Rtu.response_length({1, {6, :w, :reg}, 0, 1}, <<1, 6, 0, 1, 0, 2>>) == {:ok, 8}
     assert Rtu.response_length({1, {6, :w, :reg}, 0, 1}, <<1, 3>>) == {:error, :ebadresp}
+    assert Rtu.response_length(@read, <<2>>) == {:error, :ebadresp}
+    assert Rtu.response_length(@read, <<2, 3, 4>>) == {:error, :ebadresp}
+
+    assert Rtu.response_length({1, {6, :w, :reg}, 0, 1}, <<2, 6, 0, 1, 0, 2>>) ==
+             {:error, :ebadresp}
   end
 
   test "RTU ADU limits" do
@@ -55,8 +60,25 @@ defmodule Modbuv.RtuTest do
     end
   end
 
-  test "rejects out-of-range slave ids" do
+  test "enforces RTU slave id bounds (1..247 unicast, 0 write-only broadcast)" do
+    # Broadcast write (slave 0) is allowed
+    assert is_binary(Rtu.pack_req({0, {6, :w, :reg}, 0, 123}))
+    assert is_binary(Rtu.pack_req({0, {16, :w, :reg}, 0, [1, 2]}))
+    assert is_binary(Rtu.pack_req({247, {3, :r, :reg}, 0, 1}))
+
+    # Broadcast read (slave 0) is rejected
+    assert_raise ArgumentError, fn -> Rtu.pack_req({0, {3, :r, :reg}, 0, 1}) end
+
+    # Reserved RTU addresses (248..255) and out-of-range ids are rejected
+    assert_raise ArgumentError, fn -> Rtu.pack_req({248, {3, :r, :reg}, 0, 1}) end
+    assert_raise ArgumentError, fn -> Rtu.pack_req({255, {6, :w, :reg}, 0, 1}) end
     assert_raise ArgumentError, fn -> Rtu.pack_req({256, {3, :r, :reg}, 0, 1}) end
+
+    # Responses and exceptions require unicast slave ids (1..247)
+    assert_raise ArgumentError, fn -> Rtu.pack_res({0, {6, :w, :reg}, 0, 1}, nil) end
+    assert_raise ArgumentError, fn -> Rtu.pack_res({248, {3, :r, :reg}, 0, 1}, [1]) end
+    assert_raise ArgumentError, fn -> Rtu.pack_exception(0, 3, :eaddr) end
+    assert_raise ArgumentError, fn -> Rtu.pack_exception(248, 3, :eaddr) end
     assert_raise ArgumentError, fn -> Rtu.pack_exception(256, 3, :eaddr) end
   end
 

@@ -15,12 +15,13 @@ defmodule Modbuv.Rtu.Master do
             uart_pid: nil,
             transport: Transport.UART,
             timeout: 5_000,
+            turnaround_delay: 0,
             uart_opts: [],
             status: :closed,
             cmd: nil,
             last_cmd: nil
 
-  @doc "Starts the RTU master GenServer. `params` must include `:tty` and may include `:active`, `:timeout`, `:uart_opts`, and `:transport`."
+  @doc "Starts the RTU master GenServer. `params` must include `:tty` and may include `:active`, `:timeout`, `:turnaround_delay`, `:uart_opts`, and `:transport`."
   @spec start_link(keyword(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(params, gen_opts \\ []) do
     GenServer.start_link(__MODULE__, {params, self()}, gen_opts)
@@ -34,7 +35,7 @@ defmodule Modbuv.Rtu.Master do
   @spec state(pid()) :: %__MODULE__{}
   def state(pid), do: GenServer.call(pid, :state)
 
-  @doc "Updates the master's connection parameters (`:tty`, `:active`, `:timeout`, `:uart_opts`, `:transport`) at runtime, reopening the UART port."
+  @doc "Updates the master's connection parameters (`:tty`, `:active`, `:timeout`, `:turnaround_delay`, `:uart_opts`, `:transport`) at runtime, reopening the UART port."
   @spec configure(pid(), keyword()) :: :ok
   def configure(pid, params), do: GenServer.call(pid, {:configure, params})
 
@@ -62,6 +63,7 @@ defmodule Modbuv.Rtu.Master do
     active = Keyword.get(params, :active, false)
     tty = Keyword.fetch!(params, :tty)
     timeout = Keyword.get(params, :timeout, 5_000)
+    turnaround_delay = Keyword.get(params, :turnaround_delay, 0)
     uart_opts = Keyword.get(params, :uart_opts, speed: 115_200)
     parent_pid = if active, do: parent_pid
 
@@ -76,6 +78,7 @@ defmodule Modbuv.Rtu.Master do
       uart_pid: uart_pid,
       transport: transport,
       timeout: timeout,
+      turnaround_delay: turnaround_delay,
       uart_opts: uart_opts,
       status: status
     }
@@ -111,23 +114,43 @@ defmodule Modbuv.Rtu.Master do
 
     with :ok <- state.transport.flush(state.uart_pid),
          :ok <- state.transport.write(state.uart_pid, adu) do
-      if state.active do
-        master = self()
-        uart_pid = state.uart_pid
-        transport = state.transport
-        timeout = state.timeout
+      cond do
+        broadcast?(frame) and state.active and state.turnaround_delay > 0 ->
+          master = self()
+          delay = state.turnaround_delay
 
-        Task.start_link(fn ->
-          result = read_reply(transport, uart_pid, frame, timeout)
+          Task.start_link(fn ->
+            Process.sleep(delay)
+            Telemetry.stop(metadata, started, :ok)
+            send(master, {:async_done, frame, :ok})
+          end)
+
+          {:reply, :ok, %{state | cmd: frame}}
+
+        broadcast?(frame) ->
+          if state.turnaround_delay > 0, do: Process.sleep(state.turnaround_delay)
+          Telemetry.stop(metadata, started, :ok)
+          if state.active, do: notify(state.parent_pid, frame, :ok)
+          {:reply, :ok, %{state | cmd: nil, last_cmd: frame}}
+
+        state.active ->
+          master = self()
+          uart_pid = state.uart_pid
+          transport = state.transport
+          timeout = state.timeout
+
+          Task.start_link(fn ->
+            result = read_reply(transport, uart_pid, frame, timeout)
+            Telemetry.stop(metadata, started, result)
+            send(master, {:async_done, frame, result})
+          end)
+
+          {:reply, :ok, %{state | cmd: frame}}
+
+        true ->
+          result = read_reply(state.transport, state.uart_pid, frame, state.timeout)
           Telemetry.stop(metadata, started, result)
-          send(master, {:async_done, frame, result})
-        end)
-
-        {:reply, :ok, %{state | cmd: frame}}
-      else
-        result = read_reply(state.transport, state.uart_pid, frame, state.timeout)
-        Telemetry.stop(metadata, started, result)
-        {:reply, result, %{state | cmd: nil, last_cmd: frame}}
+          {:reply, result, %{state | cmd: nil, last_cmd: frame}}
       end
     else
       {:error, reason} ->
@@ -138,6 +161,9 @@ defmodule Modbuv.Rtu.Master do
 
   def handle_call(:read, _from, %__MODULE__{active: true} = state), do: {:reply, :error, state}
   def handle_call(:read, _from, %__MODULE__{last_cmd: nil} = state), do: {:reply, nil, state}
+
+  def handle_call(:read, _from, %__MODULE__{last_cmd: {0, _, _, _}} = state),
+    do: {:reply, :ok, state}
 
   def handle_call(:read, _from, state) do
     {:reply, read_reply(state.transport, state.uart_pid, state.last_cmd, state.timeout), state}
@@ -150,6 +176,7 @@ defmodule Modbuv.Rtu.Master do
     active = if params[:active] == nil, do: state.active, else: params[:active]
     tty = params[:tty] || state.tty
     timeout = params[:timeout] || state.timeout
+    turnaround_delay = Keyword.get(params, :turnaround_delay, state.turnaround_delay)
     uart_opts = params[:uart_opts] || state.uart_opts
     parent_pid = if active and state.parent_pid == nil, do: caller, else: state.parent_pid
 
@@ -165,6 +192,7 @@ defmodule Modbuv.Rtu.Master do
         uart_pid: uart_pid,
         transport: transport,
         timeout: timeout,
+        turnaround_delay: turnaround_delay,
         uart_opts: uart_opts,
         status: status,
         cmd: nil,
@@ -200,9 +228,18 @@ defmodule Modbuv.Rtu.Master do
         adu = binary_part(buffer, 0, length)
 
         case Rtu.parse_res(frame, adu) do
-          values when is_list(values) -> {:ok, values}
-          nil -> :ok
-          {:error, reason} -> {:error, reason}
+          values when is_list(values) ->
+            {:ok, values}
+
+          nil ->
+            :ok
+
+          {:error, reason} when reason in [:ecrc, :ebadresp] ->
+            <<_drop, rest::binary>> = buffer
+            read_loop(transport, uart_pid, frame, rest, deadline)
+
+          {:error, reason} ->
+            {:error, reason}
         end
 
       {:ok, _length} ->
@@ -210,6 +247,10 @@ defmodule Modbuv.Rtu.Master do
 
       :more ->
         continue_read(transport, uart_pid, frame, buffer, deadline)
+
+      {:error, :ebadresp} when byte_size(buffer) > 0 ->
+        <<_drop, rest::binary>> = buffer
+        read_loop(transport, uart_pid, frame, rest, deadline)
 
       {:error, reason} ->
         {:error, reason}
@@ -247,6 +288,9 @@ defmodule Modbuv.Rtu.Master do
       {:error, _reason} -> :closed
     end
   end
+
+  defp broadcast?({0, {_fc, :w, _width}, _address, _argument}), do: true
+  defp broadcast?(_frame), do: false
 
   defp mode(%__MODULE__{active: true}), do: :active
   defp mode(%__MODULE__{}), do: :passive
