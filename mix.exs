@@ -25,9 +25,9 @@ defmodule Modbuv.MixProject do
 
   defp deps do
     [
-      {:circuits_uart, "~> 1.3"},
+      {:circuits_uart, "~> 1.7"},
       {:telemetry, "~> 1.4"},
-      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
   end
 
